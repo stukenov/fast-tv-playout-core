@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_USER: dev
+      POSTGRES_DB: fast
+  redis:
+    image: redis:7
+  origin:
+    image: nginx:1.27
+    volumes:
+      - ./origin:/var/www
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+  control-api:
+    image: ftvx-control-api:local
+    environment:
+      LOG_LEVEL: info
+      API_KEY: dev-key
+      POSTGRES_DSN: postgres://dev:dev@postgres:5432/fast?sslmode=disable
+      REDIS_ADDR: redis:6379
+    depends_on: [postgres, redis]
+  epg:
+    image: ftvx-epg:local
+    environment:
+      LOG_LEVEL: info
+      REDIS_ADDR: redis:6379
+  ads:
+    image: ftvx-ads:local
+    environment:
+      LOG_LEVEL: info
+  scheduler:
+    image: ftvx-scheduler:local
+    environment:
+      LOG_LEVEL: info
+      POSTGRES_DSN: postgres://dev:dev@postgres:5432/fast?sslmode=disable
+      REDIS_ADDR: redis:6379
+      CHANNEL_ID: c1
+    depends_on: [postgres, redis]
+  playout:
+    image: ftvx-playout:local
+    environment:
+      LOG_LEVEL: info
+      ORIGIN_ROOT: /var/www
+      REDIS_ADDR: redis:6379
+      POSTGRES_DSN: postgres://dev:dev@postgres:5432/fast?sslmode=disable
+      ADS_URL: http://ads:8083/v1/ads/pod
+      CHANNEL_ID: c1
+    depends_on: [scheduler, ads, origin]
+    volumes:
+      - ./origin:/var/www
+  packager:
+    image: ftvx-packager:local
+    environment:
+      LOG_LEVEL: info
+      ORIGIN_ROOT: /var/www
+      REDIS_ADDR: redis:6379
+      CHANNEL_ID: c1
+    depends_on: [playout, origin]
+    volumes:
+      - ./origin:/var/www
+  tester:
+    image: ftvx-tester:local
+    depends_on: [control-api, epg, ads, scheduler, playout, packager, origin]
+    environment:
+      API_BASE: http://control-api:8081
+      EPG_BASE: http://epg:8082
+      ADS_BASE: http://ads:8083
+      ORIGIN_BASE: http://origin:8080
+    command: ["/bin/bash", "/app/smoke_docker.sh"]
+    volumes:
+      - ./tools/smoke_docker.sh:/app/smoke_docker.sh:ro
+      - ./origin:/var/www
+
+

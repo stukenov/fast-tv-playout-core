@@ -1,0 +1,51 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go
+vendor/
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# Media
+origin/
+*.mp4
+*.ts
+*.m3u8
+*.m4s
+
+# Database
+*.db
+*.sqlite
+
+# Docker
+.dockerignore
+
+# Build
+dist/
+build/

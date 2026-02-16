@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 10s
+
+scrape_configs:
+  - job_name: control-api
+    static_configs: [{ targets: ["control-api:8081"], labels: { service: "control-api" } }]
+  - job_name: epg
+    static_configs: [{ targets: ["epg:8082"], labels: { service: "epg" } }]
+  - job_name: ads
+    static_configs: [{ targets: ["ads:8083"], labels: { service: "ads" } }]
+  - job_name: scheduler
+    static_configs: [{ targets: ["scheduler:8084"], labels: { service: "scheduler" } }]
+  - job_name: playout
+    static_configs: [{ targets: ["playout:8085"], labels: { service: "playout" } }]
+  - job_name: packager
+    static_configs: [{ targets: ["packager:8086"], labels: { service: "packager" } }]
+
+
