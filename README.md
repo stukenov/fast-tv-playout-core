@@ -1,6 +1,27 @@
 # FAST TV Playout Core
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+[![CI](https://github.com/stukenov/fast-tv-playout-core/actions/workflows/ci.yml/badge.svg)](https://github.com/stukenov/fast-tv-playout-core/actions/workflows/ci.yml)
+
+> Turn a library of VOD files into a 24/7 ad-supported live TV channel — HLS/CMAF out, SSAI ad breaks, and EPG included.
+
 A Go-based core system for FAST (Free Ad-Supported Streaming TV) channels with VOD-to-Live conversion, server-side ad insertion (SSAI), and Electronic Program Guide (EPG) support. Built following YAGNI (You Aren't Gonna Need It) principles for a minimal viable broadcast automation system.
+
+### What is FAST / VOD-to-Live?
+
+**FAST** (Free Ad-Supported Streaming TV) channels are linear, "lean-back" TV channels delivered over the internet — think the always-on channels you scroll through on Samsung TV Plus, Pluto, or Rakuten. Unlike on-demand catalogs, viewers don't pick titles; they tune into a programmed stream that's running 24/7 and monetized with ad breaks.
+
+**VOD-to-Live** is the technique that makes this affordable: instead of running a live encoder around the clock, you take a catalog of on-demand assets (already encoded as HLS/CMAF), schedule them on a rolling timeline, and stitch their segments into a single continuous live playlist. This core does exactly that — scheduling, seamless stitching, server-side ad insertion at break boundaries, and EPG generation — so you can launch a channel from existing content instead of a broadcast chain.
+
+### Key features
+
+- **VOD-to-Live** — rolling timeline scheduler turns a catalog of VOD assets into a continuous 24/7 channel.
+- **SSAI** — server-side ad insertion with VAST 4.x, duration-based pod assembly, and house-ad fallback.
+- **HLS / CMAF** — fMP4 segments, rolling playlist window, `EXT-X-PROGRAM-DATE-TIME`, and ABR ladder support.
+- **EPG** — real-time Now/Next API and XMLTV export for FAST platforms (Samsung TV Plus, Pluto, Rakuten).
+- **Observability** — Prometheus metrics for playlist age, segment buffer, and ad fill rate, with Grafana dashboards.
+- **Microservice core** — six small, independently buildable Go services (control-api, scheduler, playout, ads, packager, epg).
 
 ## Overview
 
@@ -10,6 +31,46 @@ This is a production-ready playout engine that transforms VOD (Video On Demand) 
 - HLS/CMAF streaming output
 - EPG generation (Now/Next and XMLTV)
 - Real-time monitoring and alerting
+
+## Quickstart
+
+The fastest way to see a channel go live is the bundled Docker Compose stack (Postgres, Redis, an Nginx origin, all six services, plus Prometheus and Grafana).
+
+```bash
+# 1. Clone
+git clone https://github.com/stukenov/fast-tv-playout-core.git
+cd fast-tv-playout-core
+
+# 2. Bring up the whole stack
+docker compose up -d --build
+
+# 3. Register a channel (control-api, port 8081)
+curl -s localhost:8081/v1/channels \
+  -H 'X-API-Key: dev-key' -H 'content-type: application/json' \
+  -d '{"id":"c1","name":"FAST Movies","segment_sec":2,"ladder":["1080p","720p","480p"]}'
+
+# 4. Push a short schedule
+now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+curl -s localhost:8081/v1/schedule/c1 \
+  -H 'X-API-Key: dev-key' -H 'content-type: application/json' \
+  -d '{"entries":[{"type":"content","asset_id":"m1","uri":"s3://bucket/content/m1/index.m3u8","start":"'"$now"'","duration":30},{"type":"ad_break","start":"'"$now"'","duration":30,"category":"midroll"}]}'
+
+# 5. Read the EPG (epg, port 8082) and the HLS master (origin, port 8080)
+curl -s localhost:8082/v1/epg/c1/now-next | jq .
+curl -s localhost:8080/hls/c1/master.m3u8 | head -n 5
+```
+
+Service ports: control-api `8081`, epg `8082`, ads `8083`, scheduler `8084`, playout `8085`, packager `8086`, HLS origin `8080`, Prometheus `9090`, Grafana `3000`. See [README_RUN.md](README_RUN.md) for the full local-run guide and `tools/smoke.sh` for an end-to-end smoke test.
+
+### Build from source
+
+The services are plain Go binaries (module `ftvx`, Go 1.25) with no codegen step — `go build ./...` is exactly what CI runs:
+
+```bash
+go build ./...        # build every service
+go test ./...         # run the unit/integration tests
+go build -o bin/control-api ./services/control-api   # build a single service
+```
 
 ## Architecture
 
@@ -456,6 +517,14 @@ Contributions are welcome! Please:
 2. Create a feature branch
 3. Write tests
 4. Submit a pull request
+
+## Related projects
+
+This playout core is part of a broader broadcast and streaming suite:
+
+- **[live-streaming-server](https://github.com/stukenov/live-streaming-server)** — live ingest and streaming server.
+- **[vod-streaming-server](https://github.com/stukenov/vod-streaming-server)** — VOD packaging and delivery, the natural source of assets for VOD-to-Live.
+- **[tv-playout-backend](https://github.com/stukenov/tv-playout-backend)** — playout management and control backend.
 
 ## License
 
