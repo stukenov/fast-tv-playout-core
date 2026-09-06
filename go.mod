@@ -3,11 +3,11 @@ module ftvx
 go 1.25.0
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/redis/go-redis/v9 v9.21.0
+	github.com/redis/go-redis/v9 v9.22.0
 	github.com/rs/zerolog v1.35.1
 )
 
