@@ -3,12 +3,50 @@ on:
   push:
     branches: [main]
   pull_request:
+
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ftvx
+          POSTGRES_PASSWORD: ftvx
+          POSTGRES_DB: ftvx
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ftvx" --health-interval 3s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version-file: go.mod
       - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: Integration tests against a real PostgreSQL
+        env:
+          POSTGRES_DSN: postgres://ftvx:ftvx@localhost:5432/ftvx?sslmode=disable
+        run: go test -race -count=1 -tags integration ./pkg/storage/ ./services/control-api/
+
+  # Real sources, the whole stack in Docker, and ffmpeg decoding the result. Takes a few minutes.
+  # The default profile (a playlist of 3 minutes) and the tight one (the segment on the air and the next one).
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [default, tight]
+    steps:
+      - uses: actions/checkout@v4
+      - run: tools/e2e.sh
+        env:
+          E2E_PROFILE: ${{ matrix.profile }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-out-${{ matrix.profile }}
+          path: e2e-out/

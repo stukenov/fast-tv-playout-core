@@ -32,8 +32,10 @@ Thumbs.db
 logs/
 *.log
 
-# Media
+# Media and test output
 origin/
+media/
+e2e-out/
 *.mp4
 *.ts
 *.m3u8
@@ -42,9 +44,6 @@ origin/
 # Database
 *.db
 *.sqlite
-
-# Docker
-.dockerignore
 
 # Build
 dist/

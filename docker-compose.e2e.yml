@@ -1,0 +1,54 @@
+# End-to-end test stack: docker compose -f docker-compose.yml -f docker-compose.e2e.yml ...
+# Run it with tools/e2e.sh. Test media is generated into a volume, nothing is needed on the host.
+x-keys: &keys
+  API_KEYS: "viewer=e2e-viewer-secret-0001:read:*;ops=e2e-ops-secret-0000002:schedule+command+read:other"
+
+services:
+  assets:
+    build: { context: ., dockerfile: tools/e2e/Dockerfile }
+    command: ["make-assets.sh", "/media"]
+    volumes: [media:/media]
+
+  origin:
+    volumes:
+      - media:/var/www/vod:ro
+    depends_on:
+      assets: { condition: service_completed_successfully }
+
+  control-api:
+    environment:
+      <<: *keys
+      CUE_LEAD_S: ${CUE_LEAD_S:-3}
+
+  engine:
+    environment:
+      <<: *keys
+      SOURCE_ALLOW_HOSTS: origin
+      WEBHOOK_URLS: http://e2e:9099/hook|e2e-webhook-secret
+      SCTE35_TAGS: both
+    volumes:
+      - media:/media:ro
+    depends_on:
+      assets: { condition: service_completed_successfully }
+
+  e2e:
+    build: { context: ., dockerfile: tools/e2e/Dockerfile }
+    command: ["e2e"]
+    environment:
+      API_BASE: http://control-api:8081
+      ORIGIN_BASE: http://origin:8080
+      ENGINE_BASE: http://engine:8085
+      OUT_DIR: /out
+      CUE_LEAD_S: ${CUE_LEAD_S:-3}
+      E2E_PROFILE: ${E2E_PROFILE:-default}
+      E2E_START_LEAD_S: ${E2E_START_LEAD_S:-10}
+    volumes:
+      - ./e2e-out:/out
+      - media:/media:ro
+    depends_on:
+      - control-api
+      - engine
+      - origin
+
+volumes:
+  media:

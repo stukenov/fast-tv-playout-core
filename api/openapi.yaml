@@ -1,0 +1,520 @@
+openapi: 3.1.0
+info:
+  title: FAST TV Playout Core
+  version: 1.0.0
+  description: |
+    Control of a 24/7 live channel built from VOD files.
+
+    * **control-api** (port 8081) owns channels, assets and the schedule, and accepts commands for the air.
+    * **engine** (port 8085) plays one channel, answers for its status and publishes what is on the air.
+
+    Every request that is not `/healthz`, `/readyz` or `/metrics` needs a key: `X-API-Key: <key>` or `Authorization: Bearer <key>`.
+    A key has scopes (`read`, `schedule`, `command`, `admin`; admin includes all) and may be limited to some channels: see `API_KEYS`.
+    Every segment of the stream lasts exactly one second, so every time is a whole second and every duration is in seconds.
+
+    Write requests of the schedule and the commands accept `Idempotency-Key`; the schedule has a version (`ETag`) and `If-Match`.
+    The engine asks an ad server for the pod of each break, see `x-ads-webhook`.
+servers:
+  - url: http://localhost:8081
+    description: control-api
+  - url: http://localhost:8085
+    description: engine
+security:
+  - apiKey: []
+  - bearer: []
+tags:
+  - {name: channels}
+  - {name: assets}
+  - {name: schedule}
+  - {name: air, description: Acting on the air now}
+  - {name: engine}
+  - {name: operations}
+paths:
+  /healthz:
+    get:
+      tags: [operations]
+      summary: The process is alive
+      x-service: [control-api, engine]
+      security: []
+      responses: {"200": {description: Alive}}
+  /readyz:
+    get:
+      tags: [operations]
+      summary: "The process can do its work (control-api: PostgreSQL answers; engine: PostgreSQL answers and a playlist was written)"
+      x-service: [control-api, engine]
+      security: []
+      responses:
+        "200": {description: Ready}
+        "503": {$ref: "#/components/responses/Problem"}
+  /metrics:
+    get:
+      tags: [operations]
+      summary: Prometheus metrics
+      x-service: [control-api, engine]
+      security: []
+      responses: {"200": {description: Metrics in the Prometheus text format}}
+
+  /v1/channels:
+    get:
+      tags: [channels]
+      summary: List channels (only those the key may read)
+      x-service: [control-api]
+      x-scope: read
+      parameters:
+        - {$ref: "#/components/parameters/limit"}
+        - {$ref: "#/components/parameters/cursor"}
+      responses:
+        "200":
+          description: A page of channels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Channel"}}
+                  next_cursor: {type: string, description: "Pass it as `cursor` for the next page; empty on the last page"}
+        "401": {$ref: "#/components/responses/Problem"}
+    post:
+      tags: [channels]
+      summary: Create a channel
+      x-service: [control-api]
+      x-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ChannelCreate"}
+      responses:
+        "201":
+          description: Created
+          headers: {Location: {schema: {type: string}}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}
+        "400": {$ref: "#/components/responses/Problem"}
+        "409": {$ref: "#/components/responses/Problem"}
+  /v1/channels/{channel_id}:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    get:
+      tags: [channels]
+      summary: Get a channel
+      x-service: [control-api]
+      x-scope: read
+      responses:
+        "200":
+          description: The channel
+          headers: {ETag: {$ref: "#/components/headers/ETag"}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}
+        "404": {$ref: "#/components/responses/Problem"}
+    patch:
+      tags: [channels]
+      summary: Rename a channel or change its ladder
+      x-service: [control-api]
+      x-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: {type: string, minLength: 1}
+                ladder: {type: array, items: {type: string}}
+      responses:
+        "200": {description: The channel, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+        "400": {$ref: "#/components/responses/Problem"}
+        "404": {$ref: "#/components/responses/Problem"}
+    delete:
+      tags: [channels]
+      summary: Delete a channel and its schedule
+      x-service: [control-api]
+      x-scope: admin
+      responses:
+        "204": {description: Deleted}
+        "404": {$ref: "#/components/responses/Problem"}
+
+  /v1/channels/{channel_id}/schedule:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    get:
+      tags: [schedule]
+      summary: "The schedule of a window (default: from now, 6 hours; at most 12 hours)"
+      x-service: [control-api]
+      x-scope: read
+      parameters:
+        - {name: from, in: query, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: Entries that overlap the window, and the version of the schedule
+          headers: {ETag: {$ref: "#/components/headers/ETag"}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/Schedule"}}}
+        "400": {$ref: "#/components/responses/Problem"}
+        "404": {$ref: "#/components/responses/Problem"}
+  /v1/channels/{channel_id}/schedule:replace:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    post:
+      tags: [schedule]
+      summary: Replace the entries that start in a window, in one transaction
+      description: |
+        Entries must not overlap and must start inside the window. The engine picks the change up until a few seconds
+        before the changed second airs (`LIVE_LEAD_S`). With `dry_run=true` everything is checked and nothing is written.
+      x-service: [control-api]
+      x-scope: schedule
+      parameters:
+        - {name: dry_run, in: query, schema: {type: boolean}}
+        - {$ref: "#/components/parameters/If-Match"}
+        - {$ref: "#/components/parameters/Idempotency-Key"}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/ScheduleReplace"}}}
+      responses:
+        "200":
+          description: Replaced (or, for dry_run, valid)
+          headers:
+            ETag: {$ref: "#/components/headers/ETag"}
+            Idempotent-Replay: {schema: {type: string, enum: ["true"]}, description: "This answer repeats an earlier request with the same Idempotency-Key"}
+          content: {application/json: {schema: {$ref: "#/components/schemas/ScheduleReplaced"}}}
+        "400": {$ref: "#/components/responses/Problem"}
+        "404": {$ref: "#/components/responses/Problem"}
+        "412": {description: "The schedule is at another version than If-Match", headers: {ETag: {$ref: "#/components/headers/ETag"}}, content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+        "422": {$ref: "#/components/responses/Problem"}
+  /v1/channels/{channel_id}/now-next:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    get:
+      tags: [schedule]
+      summary: What is scheduled at this moment and what comes next
+      x-service: [control-api]
+      x-scope: read
+      responses:
+        "200":
+          description: Now and next (null when there is nothing)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channel_id: {type: string}
+                  server_time: {type: string, format: date-time}
+                  now: {oneOf: [{$ref: "#/components/schemas/NowItem"}, {type: "null"}]}
+                  next: {oneOf: [{$ref: "#/components/schemas/NowItem"}, {type: "null"}]}
+        "404": {$ref: "#/components/responses/Problem"}
+  /v1/channels/{channel_id}/commands:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    post:
+      tags: [air]
+      summary: Act on the air now
+      description: |
+        Edits the schedule and the engine airs the change one to a few seconds later (`CUE_LEAD_S` of control-api plus `LIVE_LEAD_S` of the engine).
+        `ad_break` and `insert` and `slate` put something on the air and shift everything after it later by its length; the entry that was on the air is cut
+        and goes on from where it stopped. `skip` ends what is on the air and pulls the entries that followed it back to back up to the first gap.
+      x-service: [control-api]
+      x-scope: command
+      parameters: [{$ref: "#/components/parameters/Idempotency-Key"}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/Command"}}}
+      responses:
+        "200":
+          description: Done
+          headers:
+            ETag: {$ref: "#/components/headers/ETag"}
+            Idempotent-Replay: {schema: {type: string, enum: ["true"]}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/CommandResult"}}}
+        "400": {$ref: "#/components/responses/Problem"}
+        "404": {$ref: "#/components/responses/Problem"}
+        "409": {description: "Nothing to do (nothing is on the air to skip, or an ad break is already on the air)", content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+        "422": {$ref: "#/components/responses/Problem"}
+  /v1/channels/{channel_id}/scte35:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    post:
+      tags: [air]
+      summary: Take a SCTE-35 message from an upstream system
+      description: |
+        A splice_insert that leaves the network starts an ad break of the length it carries (`break_duration`); one that returns to the network ends the break
+        that is on the air. Time signals, cancels and heartbeats are refused.
+      x-service: [control-api]
+      x-scope: command
+      parameters: [{$ref: "#/components/parameters/Idempotency-Key"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [message]
+              properties:
+                message: {type: string, description: "The splice_info_section as hex (with or without 0x) or base64"}
+                at: {type: string, description: "Optional: when to apply it, an RFC 3339 time (default: as soon as possible)"}
+      responses:
+        "200": {description: Done, content: {application/json: {schema: {$ref: "#/components/schemas/CommandResult"}}}}
+        "400": {$ref: "#/components/responses/Problem"}
+        "404": {$ref: "#/components/responses/Problem"}
+        "409": {$ref: "#/components/responses/Problem"}
+
+  /v1/assets:
+    get:
+      tags: [assets]
+      summary: List assets
+      x-service: [control-api]
+      x-scope: read
+      parameters:
+        - {name: tag, in: query, schema: {type: string}}
+        - {$ref: "#/components/parameters/limit"}
+        - {$ref: "#/components/parameters/cursor"}
+      responses:
+        "200":
+          description: A page of assets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Asset"}}
+                  next_cursor: {type: string}
+    post:
+      tags: [assets]
+      summary: "Register an asset: a prepared source (see tools/normalize.sh)"
+      x-service: [control-api]
+      x-scope: admin
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/AssetCreate"}}}
+      responses:
+        "201":
+          description: Registered
+          headers: {Location: {schema: {type: string}}}
+          content: {application/json: {schema: {type: object, properties: {asset_id: {type: string}}}}}
+        "400": {$ref: "#/components/responses/Problem"}
+        "409": {$ref: "#/components/responses/Problem"}
+  /v1/assets/{asset_id}:
+    parameters: [{name: asset_id, in: path, required: true, schema: {type: string}}]
+    get:
+      tags: [assets]
+      summary: Get an asset
+      x-service: [control-api]
+      x-scope: read
+      responses:
+        "200": {description: The asset, content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}
+        "404": {$ref: "#/components/responses/Problem"}
+    delete:
+      tags: [assets]
+      summary: Delete an asset that no schedule uses
+      x-service: [control-api]
+      x-scope: admin
+      responses:
+        "204": {description: Deleted}
+        "404": {$ref: "#/components/responses/Problem"}
+        "409": {description: "A schedule uses it", content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+
+  /v1/channels/{channel_id}/status:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    get:
+      tags: [engine]
+      summary: What the engine is doing
+      x-service: [engine]
+      x-scope: read
+      responses:
+        "200": {description: Status, content: {application/json: {schema: {$ref: "#/components/schemas/EngineStatus"}}}}
+        "404": {$ref: "#/components/responses/Problem"}
+  /v1/channels/{channel_id}/events:
+    parameters: [{$ref: "#/components/parameters/channel_id"}]
+    get:
+      tags: [engine]
+      summary: What goes on the air, as Server-Sent Events
+      description: |
+        Event types: `engine.started`, `program.started`, `break.started`, `break.ended`, `slate.started`, `slate.ended`,
+        `source.error`, `schedule.stale`, `ads.fallback`. A reconnecting client sends `Last-Event-ID` and gets what it missed
+        (the last 1000 events are kept). `?from=now` starts with what happens next. The same events go to `WEBHOOK_URLS`,
+        signed with `X-FTVX-Signature: sha256=<HMAC-SHA256 of the body>`.
+      x-service: [engine]
+      x-scope: read
+      parameters:
+        - {name: Last-Event-ID, in: header, schema: {type: string}}
+        - {name: from, in: query, schema: {type: string, enum: [now]}}
+      responses:
+        "200":
+          description: A stream of events
+          content:
+            text/event-stream:
+              schema: {$ref: "#/components/schemas/Event"}
+        "404": {$ref: "#/components/responses/Problem"}
+
+x-ads-webhook:
+  description: |
+    When ADS_URL is set, the engine POSTs this to it for every ad break, a few seconds before the break (with X-API-Key: ADS_API_KEY if set), and expects the pod.
+    It must answer within a couple of seconds; if it does not, the break is filled with slate. Without ADS_URL the engine fills breaks from
+    ADS_REGISTRY_FILE itself, and without that with slate.
+  request: {$ref: "#/components/schemas/AdPodRequest"}
+  response: {$ref: "#/components/schemas/AdPodResponse"}
+
+components:
+  securitySchemes:
+    apiKey: {type: apiKey, in: header, name: X-API-Key}
+    bearer: {type: http, scheme: bearer}
+  parameters:
+    channel_id: {name: channel_id, in: path, required: true, schema: {type: string, pattern: "^[A-Za-z0-9_.-]{1,64}$"}}
+    limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+    cursor: {name: cursor, in: query, schema: {type: string}, description: "The next_cursor of the previous page"}
+    If-Match: {name: If-Match, in: header, schema: {type: string}, description: 'The schedule version, for example "3". 412 if it changed.'}
+    Idempotency-Key: {name: Idempotency-Key, in: header, schema: {type: string, maxLength: 128}, description: "A repeat with the same key and body returns the first answer and changes nothing; with another body it is 422."}
+  headers:
+    ETag: {schema: {type: string}, description: "The version of the schedule of the channel, for If-Match"}
+  responses:
+    Problem:
+      description: An error
+      content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}
+  schemas:
+    Problem:
+      type: object
+      properties:
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+    Channel:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        segment_sec: {type: integer, const: 1}
+        ladder: {type: array, items: {type: string}}
+        created_at: {type: string, format: date-time}
+        schedule_version: {type: integer}
+    ChannelCreate:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: {type: string, pattern: "^[A-Za-z0-9_.-]{1,64}$"}
+        name: {type: string}
+        segment_sec: {type: integer, const: 1}
+        ladder: {type: array, items: {type: string}}
+    Asset:
+      type: object
+      properties:
+        id: {type: string}
+        uri: {type: string}
+        duration_s: {type: integer}
+        tags: {type: array, items: {type: string}}
+        meta: {type: object}
+        created_at: {type: string, format: date-time}
+    AssetCreate:
+      type: object
+      additionalProperties: false
+      required: [uri, duration_s]
+      properties:
+        id: {type: string, pattern: "^[A-Za-z0-9_.-]{1,64}$"}
+        uri: {type: string, description: "A media playlist (fMP4, 1 s segments): http(s):// or file:// (under SOURCE_FILE_ROOT)"}
+        duration_s: {type: integer, minimum: 1}
+        tags: {type: array, items: {type: string}}
+        meta: {type: object}
+    Entry:
+      type: object
+      required: [type, start, duration]
+      additionalProperties: false
+      properties:
+        type: {type: string, enum: [content, bumper, slate, ad_break]}
+        asset_id: {type: string, description: "A registered asset (content, bumper)"}
+        uri: {type: string, description: "Instead of asset_id"}
+        start: {type: string, format: date-time, description: "A whole second"}
+        duration: {type: integer, minimum: 1, description: "Seconds"}
+        offset_s: {type: integer, minimum: 0, description: "Where in the source the entry starts"}
+        category: {type: string, description: "Ad break: midroll, preroll, postroll or any"}
+        scte35: {type: string, description: "Ad break: hex of a splice_info_section to publish in the playlist as it is"}
+    Schedule:
+      type: object
+      properties:
+        channel_id: {type: string}
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        version: {type: integer}
+        entries: {type: array, items: {$ref: "#/components/schemas/Entry"}}
+    ScheduleReplace:
+      type: object
+      additionalProperties: false
+      required: [window, entries]
+      properties:
+        window:
+          type: object
+          additionalProperties: false
+          required: [from, to]
+          properties:
+            from: {type: string, format: date-time}
+            to: {type: string, format: date-time}
+        entries: {type: array, maxItems: 20000, items: {$ref: "#/components/schemas/Entry"}}
+    ScheduleReplaced:
+      type: object
+      properties:
+        replaced: {type: integer}
+        version: {type: integer}
+        warnings: {type: array, items: {type: string}}
+        valid: {type: boolean, description: "Only for dry_run"}
+        dry_run: {type: boolean}
+    NowItem:
+      type: object
+      properties:
+        type: {type: string}
+        asset_id: {type: string}
+        uri: {type: string}
+        start: {type: string, format: date-time}
+        end: {type: string, format: date-time}
+    Command:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: {type: string, enum: [ad_break, insert, skip, slate]}
+        at: {type: string, description: '"now" (default) or an RFC 3339 time that is not sooner than CUE_LEAD_S from now'}
+        duration: {type: integer, minimum: 1, maximum: 14400, description: "Seconds. Required for ad_break and slate; for insert it defaults to the duration of the asset"}
+        asset_id: {type: string}
+        uri: {type: string}
+        category: {type: string}
+        scte35: {type: string}
+    CommandResult:
+      type: object
+      properties:
+        type: {type: string}
+        effective_at: {type: string, format: date-time, description: "When the change reaches the air"}
+        version: {type: integer}
+        entries: {type: integer}
+        warnings: {type: array, items: {type: string}}
+    EngineStatus:
+      type: object
+      properties:
+        now_seq: {type: integer}
+        window_len: {type: integer}
+        last_timeline_at: {type: string, format: date-time}
+        ad_state: {type: string}
+        gaps: {type: integer}
+        segments: {type: integer, description: "Segments in the live playlist"}
+        last_playlist_at: {type: string, format: date-time}
+        webhooks: {type: object, properties: {delivered: {type: integer}, failed: {type: integer}, dropped: {type: integer}}}
+    Event:
+      type: object
+      properties:
+        id: {type: integer}
+        type: {type: string}
+        time: {type: string, format: date-time}
+        channel: {type: string}
+        data: {type: object}
+    AdPodRequest:
+      type: object
+      properties:
+        channel_id: {type: string}
+        break:
+          type: object
+          properties:
+            start: {type: string, format: date-time}
+            duration: {type: integer}
+            category: {type: string}
+    AdPodResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              uri: {type: string, description: "A prepared source, like any other"}
+              duration_s: {type: integer}
+              creative_id: {type: string}
+              type: {type: string}

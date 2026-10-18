@@ -1,0 +1,7 @@
+.git
+.github
+media
+e2e-out
+bin
+*.md
+deploy

@@ -1,120 +1,100 @@
+name: ftvx
+
+x-env: &env
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  API_KEY: ${API_KEY:?set API_KEY in .env}
+  API_KEYS: ${API_KEYS:-}
+  POSTGRES_DSN: postgres://ftvx:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/ftvx?sslmode=disable
+  CHANNEL_ID: ${CHANNEL_ID:-c1}
+
 services:
   postgres:
-    image: postgres:15
+    image: postgres:17-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: dev
-      POSTGRES_USER: dev
-      POSTGRES_DB: fast
-    ports: ["5432:5432"]
-
-  redis:
-    image: redis:7
-    ports: ["6379:6379"]
-
-  origin:
-    image: nginx:1.27
+      POSTGRES_USER: ftvx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ftvx
     volumes:
-      - ./origin:/var/www
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ftvx -d ftvx"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Serves the live stream (/hls/). Put a CDN in front of it. The sources are not served: the engine reads them from files.
+  # (/vod/ serves MEDIA_DIR for sources that you want to reach over http://; remove it if you do not)
+  origin:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - hls:/var/www/hls:ro
+      - ${MEDIA_DIR:-./media}:/var/www/vod:ro
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports: ["8080:8080"]
 
+  # Channels, assets, schedule and commands for the air. See api/openapi.yaml.
   control-api:
-    build: ./services/control-api
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    build: { context: ., args: { SERVICE: control-api } }
     environment:
-      LOG_LEVEL: info
-      API_KEY: dev-key
-      POSTGRES_DSN: postgres://dev:dev@postgres:5432/fast?sslmode=disable
-      REDIS_ADDR: redis:6379
-    depends_on: [postgres, redis]
-    ports: ["8081:8081"]
+      <<: *env
+      CUE_LEAD_S: ${CUE_LEAD_S:-3}
+    ports: ["127.0.0.1:8081:8081"]
 
-  epg:
-    build: ./services/epg
+  # Plays the channel: plans the schedule second by second, puts the segments of the sources on one timeline and
+  # writes the live playlist into the hls volume. It needs PostgreSQL and the sources.
+  engine:
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    build: { context: ., args: { SERVICE: engine } }
     environment:
-      LOG_LEVEL: info
-      REDIS_ADDR: redis:6379
-      API_KEY: dev-key
-      EPG_TIMELINE_SOURCE: redis
-      DEFAULT_WINDOW_HOURS: 24
-      XMLTV_EXPORT_ENABLED: "true"
-      XMLTV_EXPORT_EVERY: 15m
-      XMLTV_OUTPUT: file:///var/epg/xmltv
-      XMLTV_PUBLIC: "true"
-    ports: ["8082:8082"]
+      <<: *env
+      # sources are read from files under /media (file:///media/...) or over http(s)
+      SOURCE_FILE_ROOT: /media
+      SLATE_URI: ${SLATE_URI:-file:///media/slate/index.m3u8}
+      # ads: ADS_URL asks your ad server for every break, otherwise the engine fills breaks from this file
+      ADS_URL: ${ADS_URL:-}
+      ADS_API_KEY: ${ADS_API_KEY:-}
+      ADS_REGISTRY_FILE: ${ADS_REGISTRY_FILE:-/media/ads/_registry.json}
+      WEBHOOK_URLS: ${WEBHOOK_URLS:-}
+      SCTE35_TAGS: ${SCTE35_TAGS:-daterange}
+      # these numbers go into the master playlist and must describe your sources
+      VARIANT_ID: ${VARIANT_ID:-v720}
+      VARIANT_BANDWIDTH: ${VARIANT_BANDWIDTH:-3000000}
+      VARIANT_AVERAGE_BANDWIDTH: ${VARIANT_AVERAGE_BANDWIDTH:-2700000}
+      VARIANT_RESOLUTION: ${VARIANT_RESOLUTION:-1280x720}
+      VARIANT_FRAME_RATE: ${VARIANT_FRAME_RATE:-25}
+      VARIANT_CODECS: ${VARIANT_CODECS:-avc1.640029,mp4a.40.2}
+      PLAYLIST_WINDOW_MAX: ${PLAYLIST_WINDOW_MAX:-180}
+      LIVE_LEAD_S: ${LIVE_LEAD_S:-6}
+      TICK_MS: ${TICK_MS:-500}
+      SEGMENT_RETAIN_S: ${SEGMENT_RETAIN_S:-30}
     volumes:
-      - ./origin/epg_out:/var/epg/xmltv
+      - hls:/var/www/hls
+      - ${MEDIA_DIR:-./media}:/media:ro
+    ports: ["127.0.0.1:8085:8085"]
 
-  ads:
-    build: ./services/ads
-    environment:
-      LOG_LEVEL: info
-      API_KEY: dev-key
-      REDIS_ADDR: redis:6379
-      ADS_PREFIX_ROOT: /var/www
-      ADS_REGISTRY_FILE: /var/www/ads/_registry.json
-      VAST_TIMEOUT_MS: 350
-      VAST_DEADLINE_MS: 400
-      SELECTION_ORDER: 30,15,10,5,2
-    ports: ["8083:8083"]
-    depends_on: [redis, origin]
-    volumes:
-      - ./origin:/var/www
-
-  scheduler:
-    build: ./services/scheduler
-    environment:
-      LOG_LEVEL: info
-      POSTGRES_DSN: postgres://dev:dev@postgres:5432/fast?sslmode=disable
-      REDIS_ADDR: redis:6379
-      CHANNEL_ID: c1
-    depends_on: [postgres, redis]
-    ports: ["8084:8084"]
-
-  playout:
-    build: ./services/playout
-    environment:
-      LOG_LEVEL: info
-      ORIGIN_ROOT: /var/www
-      REDIS_ADDR: redis:6379
-      POSTGRES_DSN: postgres://dev:dev@postgres:5432/fast?sslmode=disable
-      ADS_URL: http://ads:8083/v1/ads/pod
-      CHANNEL_ID: c1
-    depends_on: [scheduler, ads, origin]
-    ports: ["8085:8085"]
-    volumes:
-      - ./origin:/var/www
-      - ./origin/spool:/spool
-
-  packager:
-    build: ./services/packager
-    environment:
-      LOG_LEVEL: info
-      ORIGIN_ROOT: /var/www
-      SPOOL_ROOT: /spool
-      CHANNEL_ID: c1
-      VARIANT_ID: v720
-      VARIANT_BANDWIDTH: 3000000
-      VARIANT_AVERAGE_BANDWIDTH: 2600000
-      VARIANT_RESOLUTION: 1280x720
-      VARIANT_FRAME_RATE: "25"
-      VARIANT_CODECS: avc1.4d401f,mp4a.40.2
-      PLAYLIST_WINDOW_MIN: 60
-      PLAYLIST_WINDOW_MAX: 90
-      TARGETDURATION_FLOOR: 2
-    depends_on: [playout, origin]
-    ports: ["8086:8086"]
-    volumes:
-      - ./origin:/var/www
-      - ./origin/spool:/spool
-
+  # docker compose --profile monitoring up -d
   prometheus:
-    image: prom/prometheus
+    profiles: [monitoring]
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    ports: ["9090:9090"]
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
 
   grafana:
-    image: grafana/grafana
-    ports: ["3000:3000"]
+    profiles: [monitoring]
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    ports: ["127.0.0.1:3000:3000"]
 
-
+volumes:
+  pgdata:
+  hls:

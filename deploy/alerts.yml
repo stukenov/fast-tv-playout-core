@@ -1,0 +1,68 @@
+# Prometheus alert rules. Add to prometheus.yml:  rule_files: ["alerts.yml"]
+groups:
+  - name: ftvx
+    rules:
+      - alert: PlaylistNotUpdating
+        expr: packager_playlist_age_seconds > 10
+        for: 15s
+        labels: { severity: critical }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: live playlist has not changed for {{ $value }}s (viewers see a frozen picture)"
+          runbook: "docs/runbook.md#playlist-not-updating"
+
+      - alert: EngineDown
+        expr: up{job="engine"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "The engine is down: nothing is planned and the playlist is not updated"
+          runbook: "docs/runbook.md#playlist-not-updating"
+
+      - alert: StreamBufferLow
+        expr: packager_segments_ahead < 1
+        for: 30s
+        labels: { severity: warning }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: no segments ahead of the clock"
+
+      - alert: ClipsDropped
+        expr: increase(packager_clips_dropped_total[5m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: clips could not be resolved even with the slate (holes in the stream)"
+          runbook: "docs/runbook.md#clips-dropped"
+
+      - alert: SourceProblems
+        expr: increase(packager_stitch_errors_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: source segments could not be used ({{ $labels.reason }}), the slate was aired instead"
+          runbook: "docs/runbook.md#source-problems"
+
+      - alert: SourcesEncodedDifferently
+        expr: increase(packager_init_changes_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: sources have different init sections, ffmpeg and many TVs cannot decode across the change"
+          runbook: "docs/runbook.md#sources-encoded-differently"
+
+      - alert: ScheduleStale
+        expr: playout_timeline_age_seconds > 60
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: the engine could not read the schedule for {{ $value }}s and airs the last one it knows"
+          runbook: "docs/runbook.md#schedule-store-down"
+
+      - alert: AdFillLow
+        expr: ad_fill_ratio < 0.6
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: ad breaks are filled by less than 60%"
+
+      - alert: AdServerErrors
+        expr: increase(playout_ad_errors_total[5m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Channel {{ $labels.channel }}: ad requests are failing, breaks may air as slate"
